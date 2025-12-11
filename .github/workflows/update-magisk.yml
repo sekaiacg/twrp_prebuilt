@@ -1,0 +1,175 @@
+name: Update Magisk Files
+
+# 每周一凌晨2点运行
+on:
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  update-magisk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up environment
+        run: |
+          mkdir -p Magisk
+          echo "CURRENT_DIR=$(pwd)" >> $GITHUB_ENV
+
+      # 更新Magisk.apk（topjohnwu/Magisk）
+      - name: Update Magisk.apk from topjohnwu/Magisk
+        run: |
+          # 获取包括预发布的最新release
+          RESPONSE=$(curl -s "https://api.github.com/repos/topjohnwu/Magisk/releases?per_page=1&include_prereleases=true")
+          
+          # 提取基础信息
+          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name')
+          RELEASE_DATE=$(echo "$RESPONSE" | jq -r '.[0].published_at' | cut -c 1-10 | tr -d '-')
+          SHORT_DATE=$(echo "$RELEASE_DATE" | sed 's/^..//')
+          
+          # 提取版本号
+          VERSION=$(echo "$TAG_NAME" | sed 's/^v//')
+          
+          # 确定发布渠道（stable/beta）
+          IS_PRERELEASE=$(echo "$RESPONSE" | jq -r '.[0].prerelease')
+          CHANNEL="beta"
+          [ "$IS_PRERELEASE" = "false" ] && CHANNEL="stable"
+          
+          # 查找APK下载链接（匹配Magisk-*.apk）
+          APK_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name | test("Magisk-.*\\.apk")) | .browser_download_url')
+          
+          # 检查是否获取到有效信息
+          if [ -z "$APK_URL" ] || [ "$APK_URL" = "null" ]; then
+            echo "❌ 未找到Magisk APK下载链接"
+            exit 0
+          fi
+
+          # 提取Source code (zip)的下载链接（GitHub自动生成的源码包）
+          ZIP_URL=$(echo "$RESPONSE" | jq -r '.[0].zipball_url')
+          # 创建临时目录存放源码
+          TEMP_DIR="temp_magisk_source"
+          mkdir -p "$TEMP_DIR"
+          
+          # 下载源码包
+          echo "📥 下载Magisk源码包: $ZIP_URL"
+          if ! curl -L --retry 3 "$ZIP_URL" -o "$TEMP_DIR/magisk_source.zip"; then
+            echo "⚠️  源码包下载失败，尝试跳过版本码提取"
+            VERSION_CODE="unknown"
+          else
+            # 解压源码包（安静模式，不输出冗余信息）
+            unzip -q "$TEMP_DIR/magisk_source.zip" -d "$TEMP_DIR"
+            # 查找app/gradle.properties文件（解压后的目录名是随机的，用通配符匹配）
+            GRADLE_PROPERTIES=$(find "$TEMP_DIR" -path "*/app/gradle.properties" | head -1)
+            
+            # 提取magisk.versionCode
+            if [ -z "$GRADLE_PROPERTIES" ]; then
+              echo "⚠️  未找到app/gradle.properties，版本码设为unknown"
+              VERSION_CODE="unknown"
+            else
+              VERSION_CODE=$(grep -oP 'magisk\.versionCode\s*=\s*\K\d+' "$GRADLE_PROPERTIES")
+              if [ -z "$VERSION_CODE" ]; then
+                echo "⚠️  未提取到magisk.versionCode，设为unknown"
+                VERSION_CODE="unknown"
+              else
+                echo "✅ 提取到版本码: $VERSION_CODE"
+              fi
+            fi
+          fi
+          # 清理临时文件
+          rm -rf "$TEMP_DIR"
+          
+          # 检查本地版本是否已为最新
+          CURRENT_VERSION_INFO=$(cat Magisk/MagiskVer 2>/dev/null | awk -F'[\\[\\]-]' '{print $2 "|" $3}')
+          CURRENT_VERSION=$(echo "$CURRENT_VERSION_INFO" | cut -d'|' -f1)
+          CURRENT_VERSION_CODE=$(echo "$CURRENT_VERSION_INFO" | cut -d'|' -f2)
+          # 组合当前版本信息（用于判断是否更新）
+          NEW_VERSION_INFO="$VERSION|$VERSION_CODE"
+          
+          if [ "$CURRENT_VERSION_INFO" = "$NEW_VERSION_INFO" ] && [ "$CURRENT_VERSION" != "" ]; then
+            echo "✅ Magisk已是最新版本（v$VERSION[$VERSION_CODE]），无需更新"
+            exit 0
+          fi
+          
+          # 下载并更新文件
+          echo "📥 下载最新Magisk: $APK_URL"
+          curl -L --retry 3 "$APK_URL" -o Magisk/Magisk.apk
+          
+          # 更新版本文件
+          VERSION_LINE="Magisk-v$VERSION[$VERSION_CODE]-$CHANNEL-$SHORT_DATE"
+          echo "$VERSION_LINE" > Magisk/MagiskVer
+          echo "✅ 已更新Magisk到版本: $VERSION_LINE"
+
+      # 更新MagiskAlpha.apk（vvb2060/Magisk）
+      - name: Update MagiskAlpha.apk from vvb2060/Magisk
+        run: |
+          # 获取最新release
+          RESPONSE=$(curl -s "https://api.github.com/repos/vvb2060/Magisk/releases/latest")
+          
+          # 提取基础信息
+          TAG_NAME=$(echo "$RESPONSE" | jq -r '.tag_name')
+          RELEASE_DATE=$(echo "$RESPONSE" | jq -r '.published_at' | cut -c 1-10 | tr -d '-')
+          SHORT_DATE=$(echo "$RELEASE_DATE" | sed 's/^..//')
+          
+          # 提取版本信息（从标题中提取commit信息）
+          TITLE=$(echo "$RESPONSE" | jq -r '.name')
+          COMMIT=$(echo "$TITLE" | cut -d'-' -f1)
+          
+          # 查找APK下载链接
+          APK_URL=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name == "app-release.apk") | .browser_download_url')
+          
+          # 检查是否获取到有效信息
+          if [ -z "$APK_URL" ] || [ "$APK_URL" = "null" ]; then
+            echo "❌ 未找到MagiskAlpha APK下载链接"
+            exit 0
+          fi
+          
+          # 检查本地版本是否已为最新
+          CURRENT_TAG=$(cat Magisk/MagiskAlphaVer 2>/dev/null | grep -oP '\[\K\d+' | head -1)
+          if [ "$CURRENT_TAG" = "$TAG_NAME" ]; then
+            echo "✅ MagiskAlpha已是最新版本（$TAG_NAME），无需更新"
+            exit 0
+          fi
+          
+          # 下载并更新文件
+          echo "📥 下载最新MagiskAlpha: $APK_URL"
+          curl -L --retry 3 "$APK_URL" -o Magisk/MagiskAlpha.apk
+          
+          # 更新版本文件
+          VERSION_LINE="Magisk-$COMMIT-alpha-[$TAG_NAME]-$SHORT_DATE"
+          echo "$VERSION_LINE" > Magisk/MagiskAlphaVer
+          echo "✅ 已更新MagiskAlpha到版本: $VERSION_LINE"
+
+      # 生成校验和
+      - name: Generate verify.sha256sum
+        run: |
+          # 确保脚本可执行
+          chmod +x Magisk/genverify.sh
+          # 运行生成校验和的脚本
+          cd Magisk
+          ./genverify.sh
+          echo "✅ 已更新verify.sha256sum校验和"
+
+      # 检查变更并提交
+      - name: Check for changes
+        id: check_changes
+        run: |
+          git status
+          if git diff --quiet; then
+            echo "changes=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  无文件变更，无需提交"
+          else
+            echo "changes=true" >> $GITHUB_OUTPUT
+            echo "ℹ️  检测到变更，准备提交"
+          fi
+
+      - name: Commit and push changes
+        if: steps.check_changes.outputs.changes == 'true'
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add .
+          git commit -m "Auto-update Magisk files ($(date +'%Y-%m-%d'))"
+          git push
+          echo "✅ 已提交更新到仓库"
